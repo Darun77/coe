@@ -1,0 +1,26 @@
+{
+  "baseline": {
+    "name": "Naive Baseline",
+    "totalDistanceKm": 179.22,
+    "slaBreachCount": 19,
+    "onTimeSlaPercent": 81.0,
+    "cashBreachCount": 3,
+    "incompatibilityErrors": 15,
+    "rtoDelayErrors": 6,
+    "co2EmissionsKg": 37.81,
+    "numRoutes": 3
+  },
+  "constraintEngine": {
+    "name": "Constraint-Aware Engine",
+    "totalDistanceKm": 464.42,
+    "slaBreachCount": 11,
+    "onTimeSlaPercent": 89.0,
+    "cashBreachCount": 0,
+    "incompatibilityErrors": 0,
+    "rtoDelayErrors": 3,
+    "co2EmissionsKg": 97.99,
+    "numRoutes": 9
+  },
+  "distanceSavedKm": -285.2,
+  "distanceSavedPercent": -159.1
+}
