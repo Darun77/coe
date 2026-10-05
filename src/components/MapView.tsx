@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import type { Depot, CalculatedRoute, ParcelOrder } from '../types';
-import { RefreshCw, DollarSign } from 'lucide-react';
+import { RefreshCw, DollarSign, Play, Pause, RotateCcw, Truck } from 'lucide-react';
 
 interface MapViewProps {
   depot: Depot;
@@ -20,6 +20,8 @@ export const MapView: React.FC<MapViewProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hoveredOrder, setHoveredOrder] = useState<ParcelOrder | null>(null);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [animProgress, setAnimProgress] = useState<number>(0); // 0.0 to 1.0
 
   // Compute bounding box coordinates
   let minLat = depot.lat - 0.08;
@@ -41,6 +43,20 @@ export const MapView: React.FC<MapViewProps> = ({
   minLng -= padLng;
   maxLng += padLng;
 
+  // Animation Loop
+  useEffect(() => {
+    let animId: number;
+    if (isPlaying) {
+      animId = requestAnimationFrame(() => {
+        setAnimProgress((prev) => {
+          if (prev >= 1) return 0;
+          return prev + 0.003;
+        });
+      });
+    }
+    return () => cancelAnimationFrame(animId);
+  }, [isPlaying, animProgress]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -50,15 +66,14 @@ export const MapView: React.FC<MapViewProps> = ({
     const width = canvas.width;
     const height = canvas.height;
 
-    // Coordinate translation helper
     const toScreenX = (lng: number) => ((lng - minLng) / (maxLng - minLng)) * width;
     const toScreenY = (lat: number) => height - ((lat - minLat) / (maxLat - minLat)) * height;
 
     // 1. Draw Map Background Grid & Roads
-    ctx.fillStyle = '#0f172a'; // slate-900
+    ctx.fillStyle = '#0f172a';
     ctx.fillRect(0, 0, width, height);
 
-    ctx.strokeStyle = '#1e293b'; // slate-800
+    ctx.strokeStyle = '#1e293b';
     ctx.lineWidth = 1;
     const gridSize = 40;
     for (let x = 0; x < width; x += gridSize) {
@@ -101,13 +116,13 @@ export const MapView: React.FC<MapViewProps> = ({
       ctx.setLineDash([]);
     });
 
-    // 3. Draw Depot Marker
+    // 3. Draw Depot Marker with Pulse Ring
     const depotX = toScreenX(depot.lng);
     const depotY = toScreenY(depot.lat);
 
-    ctx.fillStyle = '#3b82f6'; // blue-500
+    ctx.fillStyle = '#3b82f6';
     ctx.beginPath();
-    ctx.arc(depotX, depotY, 12, 0, Math.PI * 2);
+    ctx.arc(depotX, depotY, 13, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = '#ffffff';
     ctx.lineWidth = 3;
@@ -123,32 +138,60 @@ export const MapView: React.FC<MapViewProps> = ({
       const x = toScreenX(ord.lng);
       const y = toScreenY(ord.lat);
 
-      let nodeColor = '#64748b'; // slate-500
-      if (ord.category === 'Hazmat') nodeColor = '#ef4444'; // red
-      else if (ord.category === 'Food') nodeColor = '#10b981'; // green
-      else if (ord.category === 'ColdChain') nodeColor = '#06b6d4'; // cyan
-      else if (ord.category === 'Fragile') nodeColor = '#f59e0b'; // amber
+      let nodeColor = '#64748b';
+      if (ord.category === 'Hazmat') nodeColor = '#ef4444';
+      else if (ord.category === 'Food') nodeColor = '#10b981';
+      else if (ord.category === 'ColdChain') nodeColor = '#06b6d4';
+      else if (ord.category === 'Fragile') nodeColor = '#f59e0b';
 
-      // Draw node circle
       ctx.fillStyle = nodeColor;
       ctx.beginPath();
       ctx.arc(x, y, 7, 0, Math.PI * 2);
       ctx.fill();
 
       if (ord.codAmount > 0) {
-        ctx.strokeStyle = '#facc15'; // yellow ring for COD
+        ctx.strokeStyle = '#facc15';
         ctx.lineWidth = 2;
         ctx.stroke();
       }
 
       if (ord.isRTO) {
-        ctx.strokeStyle = '#a855f7'; // purple ring for RTO
+        ctx.strokeStyle = '#a855f7';
         ctx.lineWidth = 2;
         ctx.stroke();
       }
     });
 
-  }, [depot, routes, orders, selectedRouteId, minLat, maxLat, minLng, maxLng]);
+    // 5. Draw Animated Vehicles Moving along Routes
+    routes.forEach((route) => {
+      if (route.stops.length === 0) return;
+      const points = [
+        { x: depotX, y: depotY },
+        ...route.stops.map((s) => ({ x: toScreenX(s.order.lng), y: toScreenY(s.order.lat) })),
+        { x: depotX, y: depotY },
+      ];
+
+      const totalSegments = points.length - 1;
+      const progressScaled = animProgress * totalSegments;
+      const segIndex = Math.min(Math.floor(progressScaled), totalSegments - 1);
+      const segFrac = progressScaled - segIndex;
+
+      const p1 = points[segIndex];
+      const p2 = points[segIndex + 1];
+
+      const vehX = p1.x + (p2.x - p1.x) * segFrac;
+      const vehY = p1.y + (p2.y - p1.y) * segFrac;
+
+      ctx.fillStyle = route.color;
+      ctx.beginPath();
+      ctx.arc(vehX, vehY, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+
+  }, [depot, routes, orders, selectedRouteId, animProgress, minLat, maxLat, minLng, maxLng]);
 
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -183,10 +226,10 @@ export const MapView: React.FC<MapViewProps> = ({
     <div className="relative w-full h-full rounded-2xl overflow-hidden border border-slate-800 bg-slate-900 shadow-2xl flex flex-col">
       
       {/* Map Control Bar */}
-      <div className="bg-slate-950/80 backdrop-blur-md px-4 py-2.5 border-b border-slate-800 flex items-center justify-between z-10">
+      <div className="bg-slate-950/90 backdrop-blur-md px-4 py-2.5 border-b border-slate-800 flex items-center justify-between z-10">
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1.5 text-xs text-slate-300 font-medium">
-            <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Central Depot
+            <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span> Depot Hub
           </span>
           <span className="flex items-center gap-1 text-xs text-slate-400">
             <span className="w-2.5 h-2.5 rounded-full bg-red-500"></span> Hazmat
@@ -201,8 +244,26 @@ export const MapView: React.FC<MapViewProps> = ({
             <span className="w-2.5 h-2.5 rounded-full bg-purple-500"></span> RTO Return
           </span>
         </div>
-        <div className="text-xs text-slate-400 font-mono">
-          Showing {routes.length} Active Routes | {orders.length} Parcels
+
+        {/* Animation Playback Controls */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsPlaying(!isPlaying)}
+            className="px-3 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all shadow-md shadow-blue-600/30"
+          >
+            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-white" />}
+            {isPlaying ? 'Pause Simulation' : 'Play Route Motion'}
+          </button>
+          <button
+            onClick={() => {
+              setIsPlaying(false);
+              setAnimProgress(0);
+            }}
+            className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-all"
+            title="Reset Animation"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
         </div>
       </div>
 
@@ -216,6 +277,14 @@ export const MapView: React.FC<MapViewProps> = ({
           onClick={handleCanvasClick}
           className="w-full h-full object-cover cursor-pointer"
         />
+
+        {/* Live Delivery Motion Tracker Badge */}
+        {isPlaying && (
+          <div className="absolute top-4 right-4 bg-slate-950/90 border border-blue-500/40 px-3 py-1.5 rounded-xl shadow-xl backdrop-blur-md text-xs text-blue-300 font-mono flex items-center gap-2">
+            <Truck className="w-4 h-4 text-blue-400 animate-bounce" />
+            <span>Simulating Fleet Delivery Route... {Math.round(animProgress * 100)}%</span>
+          </div>
+        )}
 
         {/* Hover Tooltip Card */}
         {hoveredOrder && (

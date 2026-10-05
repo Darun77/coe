@@ -114,11 +114,21 @@ export const RiderView: React.FC<RiderViewProps> = ({ routes }) => {
             </div>
 
             {cashCapPercent >= 80 && (
-              <div className="text-[10px] text-amber-300 font-semibold bg-amber-500/10 p-1.5 rounded-lg border border-amber-500/20 flex items-center gap-1">
-                <ShieldAlert className="w-3 h-3 text-amber-400" />
-                {cashCapPercent >= 100
-                  ? 'CRITICAL: Vault drop stop required before next COD delivery!'
-                  : 'Warning: 80% COD cash limit reached.'}
+              <div className="text-[10px] text-amber-300 font-semibold bg-amber-500/10 p-2 rounded-xl border border-amber-500/20 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1">
+                    <ShieldAlert className="w-3 h-3 text-amber-400" />
+                    {cashCapPercent >= 100
+                      ? 'CRITICAL: Vault drop required!'
+                      : 'Warning: 80% COD cash limit reached.'}
+                  </span>
+                  <button
+                    onClick={() => setCompletedStopIds([])}
+                    className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-600 text-white hover:bg-blue-500 transition-all"
+                  >
+                    Execute Vault Drop
+                  </button>
+                </div>
               </div>
             )}
           </div>

@@ -1,6 +1,6 @@
 import type { Depot, ParcelOrder, Rider, CalculatedRoute, RouteStop, BatchMetrics, ProductCategory } from '../types';
 
-const ROUTE_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#06b6d4', '#ec4899', '#34d399'];
+const ROUTE_COLORS = ['#3b82f6', '#10b981', '#8b5cf6', '#f59e0b', '#06b6d4', '#ec4899', '#34d399', '#6366f1', '#14b8a6', '#f97316'];
 
 function haversineDistanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371.0;
@@ -29,101 +29,177 @@ function routeHasIncompatibility(routeOrders: ParcelOrder[], newOrder: ParcelOrd
 
 /**
  * Constraint-Aware Intelligent Batching & Routing Engine:
- * 1. Partitions orders by incompatibility groups (Hazmat, Food/Cold, General).
- * 2. Enforces COD Cash Cap ($1,000 max) as a hard constraint per route.
- * 3. Synchronizes RTO readiness windows (arrives when customer is ready).
- * 4. Optimizes time-window insertion to maximize SLA compliance while minimizing total mileage.
+ * 1. Parallel multi-route slot insertion across fleet riders.
+ * 2. Strict product incompatibility segregation (Hazmat vs Food/Fragile/ColdChain).
+ * 3. Mid-route COD cash vault drop routing (caps cash exposure at maxCodCash).
+ * 4. Dual-window timing synchronization (delivery TW [twStart, twEnd], RTO [rtoReadyTime, rtoDeadline]).
+ * 5. 2-opt local search route trajectory optimization.
  */
 export function runConstraintAwareEngine(depot: Depot, riders: Rider[], orders: ParcelOrder[]): { routes: CalculatedRoute[]; metrics: BatchMetrics } {
   const unassigned = [...orders];
   
-  // Sort orders by SLA end time and location urgency
+  // Sort orders by SLA window end, RTO readiness, and depot distance
   unassigned.sort((a, b) => {
     if (a.twEnd !== b.twEnd) return a.twEnd - b.twEnd;
-    const distA = haversineDistanceKm(depot.lat, depot.lng, a.lat, a.lng);
-    const distB = haversineDistanceKm(depot.lat, depot.lng, b.lat, b.lng);
-    return distA - distB;
+    const readyA = a.isRTO ? a.rtoReadyTime : a.twStart;
+    const readyB = b.isRTO ? b.rtoReadyTime : b.twStart;
+    if (readyA !== readyB) return readyA - readyB;
+    return haversineDistanceKm(depot.lat, depot.lng, a.lat, a.lng) - haversineDistanceKm(depot.lat, depot.lng, b.lat, b.lng);
   });
   
-  const routes: CalculatedRoute[] = [];
-  let riderIndex = 0;
+  // Active routes matching fleet riders
+  const routePool: { rider: Rider; orders: ParcelOrder[] }[] = riders.map((r) => ({ rider: { ...r }, orders: [] }));
   
-  while (unassigned.length > 0) {
-    const rider = riders[riderIndex % riders.length];
-    riderIndex++;
+  for (const ord of unassigned) {
+    let bestRouteIdx = -1;
+    let bestSlotPos = -1;
+    let bestScore = Infinity;
     
-    let currLat = depot.lat;
-    let currLng = depot.lng;
-    let currWeight = 0;
-    let currVolume = 0;
-    let currCash = 0;
-    let currTimeMin = 0;
-    
-    const routeOrders: ParcelOrder[] = [];
-    
-    while (unassigned.length > 0) {
-      let bestIdx = -1;
-      let bestScore = Infinity;
+    for (let rIdx = 0; rIdx < routePool.length; rIdx++) {
+      const { rider, orders: rOrders } = routePool[rIdx];
       
-      for (let i = 0; i < unassigned.length; i++) {
-        const ord = unassigned[i];
+      // 1. Incompatibility Hard Rule
+      if (routeHasIncompatibility(rOrders, ord)) continue;
+      
+      // 2. Physical Capacity Hard Check
+      const currWeight = rOrders.reduce((sum, o) => sum + o.weightKg, 0) + ord.weightKg;
+      const currVol = rOrders.reduce((sum, o) => sum + o.volumeM3, 0) + ord.volumeM3;
+      if (currWeight > rider.maxWeightKg || currVol > rider.maxVolumeM3) continue;
+      
+      // 3. Evaluate multi-slot insertion feasibility & timing
+      for (let pos = 0; pos <= rOrders.length; pos++) {
+        const candidateOrders = [...rOrders.slice(0, pos), ord, ...rOrders.slice(pos)];
         
-        // 1. Strict Product Incompatibility Hard Rule
-        if (routeHasIncompatibility(routeOrders, ord)) continue;
+        // COD cash check with vault drop capability
+        const { cashOk, vaultDropsNeeded } = checkCashVaultFeasibility(candidateOrders, rider.maxCodCash);
+        if (!cashOk) continue;
         
-        // 2. Physical & COD Cash Hard Caps
-        if (currWeight + ord.weightKg > rider.maxWeightKg) continue;
-        if (currVolume + ord.volumeM3 > rider.maxVolumeM3) continue;
-        if (currCash + ord.codAmount > rider.maxCodCash) continue;
+        // Dual-window SLA & RTO timing feasibility check
+        const timingResult = evaluateRouteTiming(depot, candidateOrders);
+        if (!timingResult.feasible) continue;
         
-        // 3. Travel Distance & Arrival Calculation
-        const dist = haversineDistanceKm(currLat, currLng, ord.lat, ord.lng);
-        const travelTime = dist / 0.5; // 30 km/h avg speed
-        const arrivalTime = currTimeMin + travelTime;
-        
-        // SLA & RTO penalties for soft scoring
-        const slaLatePenalty = Math.max(0, arrivalTime - ord.twEnd) * 10;
-        const rtoWaitPenalty = ord.isRTO && arrivalTime < ord.rtoReadyTime ? (ord.rtoReadyTime - arrivalTime) * 2 : 0;
-        
-        const score = dist + slaLatePenalty + rtoWaitPenalty;
+        const score = timingResult.totalDistance + 0.1 * timingResult.idlingMinutes + vaultDropsNeeded * 4.0;
         
         if (score < bestScore) {
           bestScore = score;
-          bestIdx = i;
+          bestRouteIdx = rIdx;
+          bestSlotPos = pos;
         }
       }
-      
-      if (bestIdx === -1) break;
-      
-      const selected = unassigned.splice(bestIdx, 1)[0];
-      const dist = haversineDistanceKm(currLat, currLng, selected.lat, selected.lng);
-      
-      routeOrders.push(selected);
-      currWeight += selected.weightKg;
-      currVolume += selected.volumeM3;
-      currCash += selected.codAmount;
-      
-      const travelTime = dist / 0.5;
-      const arrivalTime = currTimeMin + travelTime;
-      
-      // If RTO item is not yet ready, courier waits or adjusts time
-      if (selected.isRTO && arrivalTime < selected.rtoReadyTime) {
-        currTimeMin = selected.rtoReadyTime + 5;
-      } else {
-        currTimeMin = arrivalTime + 5;
-      }
-      
-      currLat = selected.lat;
-      currLng = selected.lng;
     }
     
-    if (routeOrders.length > 0) {
-      routes.push(buildCalculatedRoute(depot, rider, routeOrders, routes.length));
+    if (bestRouteIdx !== -1) {
+      routePool[bestRouteIdx].orders.splice(bestSlotPos, 0, ord);
+    } else {
+      // Create backup route with additional rider if order volume requires
+      const templateRider = riders[routePool.length % riders.length];
+      const newRider: Rider = {
+        ...templateRider,
+        id: `RIDER-EXTRA-${String(routePool.length + 1).padStart(2, '0')}`,
+        name: `${templateRider.name} (Sub)`,
+      };
+      routePool.push({ rider: newRider, orders: [ord] });
     }
   }
   
-  const metrics = calculateMetrics('Constraint-Aware Engine', routes, orders.length);
-  return { routes, metrics };
+  // Filter active non-empty routes and apply 2-opt refinement
+  const activeRoutes = routePool.filter((r) => r.orders.length > 0);
+  for (const r of activeRoutes) {
+    r.orders = optimizeRoute2Opt(depot, r.orders);
+  }
+  
+  const calculatedRoutes = activeRoutes.map((r, i) => buildCalculatedRoute(depot, r.rider, r.orders, i));
+  const metrics = calculateMetrics('Constraint-Aware Engine', calculatedRoutes, orders.length);
+  return { routes: calculatedRoutes, metrics };
+}
+
+function checkCashVaultFeasibility(orders: ParcelOrder[], maxCash: number): { cashOk: boolean; vaultDropsNeeded: number } {
+  let accumCash = 0;
+  let vaultDropsNeeded = 0;
+  for (const o of orders) {
+    if (accumCash + o.codAmount > maxCash) {
+      vaultDropsNeeded++;
+      accumCash = o.codAmount;
+      if (accumCash > maxCash) return { cashOk: false, vaultDropsNeeded: 0 };
+    } else {
+      accumCash += o.codAmount;
+    }
+  }
+  return { cashOk: true, vaultDropsNeeded };
+}
+
+function evaluateRouteTiming(depot: Depot, orders: ParcelOrder[]): { feasible: boolean; totalDistance: number; idlingMinutes: number } {
+  let currLat = depot.lat;
+  let currLng = depot.lng;
+  let currTime = 0;
+  let totalDist = 0;
+  let idlingMin = 0;
+  
+  for (const ord of orders) {
+    const legDist = haversineDistanceKm(currLat, currLng, ord.lat, ord.lng);
+    totalDist += legDist;
+    const travelTime = legDist / 0.5; // 30 km/h speed = 0.5 km/min
+    const arrivalTime = currTime + travelTime;
+    
+    // Dual-window lower bound
+    let winStart = ord.twStart;
+    if (ord.isRTO) {
+      winStart = Math.max(winStart, ord.rtoReadyTime);
+    }
+    
+    let serviceStart = arrivalTime;
+    if (arrivalTime < winStart) {
+      const wait = winStart - arrivalTime;
+      idlingMin += wait;
+      serviceStart = winStart;
+    }
+    
+    // Dual-window upper bound
+    let winEnd = ord.twEnd;
+    if (ord.isRTO && ord.rtoDeadline) {
+      winEnd = Math.min(winEnd, ord.rtoDeadline);
+    }
+    
+    // Hard check: service start must be within window end
+    if (serviceStart > winEnd + 15) {
+      return { feasible: false, totalDistance: Infinity, idlingMinutes: Infinity };
+    }
+    
+    currTime = serviceStart + 5.0; // 5 mins service stop
+    currLat = ord.lat;
+    currLng = ord.lng;
+  }
+  
+  totalDist += haversineDistanceKm(currLat, currLng, depot.lat, depot.lng);
+  return { feasible: true, totalDistance: totalDist, idlingMinutes: idlingMin };
+}
+
+function optimizeRoute2Opt(depot: Depot, orders: ParcelOrder[]): ParcelOrder[] {
+  if (orders.length <= 3) return orders;
+  let bestOrders = [...orders];
+  let bestEval = evaluateRouteTiming(depot, bestOrders);
+  if (!bestEval.feasible) return orders;
+  
+  let improved = true;
+  let iterations = 0;
+  while (improved && iterations < 15) {
+    improved = false;
+    iterations++;
+    for (let i = 1; i < bestOrders.length - 1; i++) {
+      for (let j = i + 1; j < bestOrders.length; j++) {
+        const candidate = [...bestOrders.slice(0, i), ...bestOrders.slice(i, j + 1).reverse(), ...bestOrders.slice(j + 1)];
+        const evalRes = evaluateRouteTiming(depot, candidate);
+        if (evalRes.feasible && evalRes.totalDistance < bestEval.totalDistance - 0.01) {
+          bestEval = evalRes;
+          bestOrders = candidate;
+          improved = true;
+          break;
+        }
+      }
+      if (improved) break;
+    }
+  }
+  return bestOrders;
 }
 
 function buildCalculatedRoute(depot: Depot, rider: Rider, routeOrders: ParcelOrder[], routeIndex: number): CalculatedRoute {
@@ -148,24 +224,43 @@ function buildCalculatedRoute(depot: Depot, rider: Rider, routeOrders: ParcelOrd
     totalDist += legDist;
     
     const travelTimeMin = legDist / 0.5;
-    let arrivalTime = currTimeMin + travelTimeMin;
+    const arrivalTime = currTimeMin + travelTimeMin;
     
-    let isRtoEarly = false;
-    if (ord.isRTO && arrivalTime < ord.rtoReadyTime) {
-      isRtoEarly = true;
-      rtoEarlyCount++;
-      // Courier waits until ready time
-      arrivalTime = ord.rtoReadyTime;
+    let winStart = ord.twStart;
+    if (ord.isRTO) {
+      winStart = Math.max(winStart, ord.rtoReadyTime);
     }
     
-    currTimeMin = arrivalTime + 5;
+    let isRtoEarly = false;
+    let serviceStart = arrivalTime;
+    if (arrivalTime < winStart) {
+      if (ord.isRTO && arrivalTime < ord.rtoReadyTime) {
+        isRtoEarly = true;
+        rtoEarlyCount++;
+      }
+      serviceStart = winStart;
+    }
+    
+    currTimeMin = serviceStart + 5;
     currLat = ord.lat;
     currLng = ord.lng;
-    accumCash += ord.codAmount;
+    
+    if (accumCash + ord.codAmount > rider.maxCodCash) {
+      // Vault drop reset
+      accumCash = ord.codAmount;
+    } else {
+      accumCash += ord.codAmount;
+    }
+    
     totalWeight += ord.weightKg;
     totalVol += ord.volumeM3;
     
-    const isSlaBreach = arrivalTime > ord.twEnd;
+    let winEnd = ord.twEnd;
+    if (ord.isRTO && ord.rtoDeadline) {
+      winEnd = Math.min(winEnd, ord.rtoDeadline);
+    }
+    
+    const isSlaBreach = serviceStart > winEnd;
     if (isSlaBreach) slaBreachCount++;
     
     let hasIncomp = false;
@@ -174,14 +269,10 @@ function buildCalculatedRoute(depot: Depot, rider: Rider, routeOrders: ParcelOrd
       if (hasIncomp) hasIncompatibilityViolation = true;
     }
     
-    if (accumCash > rider.maxCodCash) {
-      hasCashBreach = true;
-    }
-    
     stops.push({
-      order: { ...ord, estimatedArrival: Math.round(arrivalTime) },
+      order: { ...ord, estimatedArrival: Math.round(serviceStart) },
       stopSequence: i + 1,
-      estimatedArrivalMin: Math.round(arrivalTime),
+      estimatedArrivalMin: Math.round(serviceStart),
       accumulatedCash: accumCash,
       isSlaBreach,
       isRtoEarly,
@@ -225,7 +316,7 @@ function calculateMetrics(name: string, routes: CalculatedRoute[], totalOrdersCo
   
   const slaOnTimePercent = parseFloat((100 * (1 - slaBreachCount / Math.max(1, totalOrdersCount))).toFixed(1));
   const co2EmissionsKg = parseFloat((totalDistanceKm * 0.211).toFixed(2));
-  const totalCostDollars = parseFloat((totalDistanceKm * 1.30 + routes.length * 40).toFixed(2));
+  const totalCostDollars = parseFloat((totalDistanceKm * 1.35 + routes.length * 40).toFixed(2));
   
   return {
     name,

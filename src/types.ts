@@ -16,6 +16,7 @@ export interface ParcelOrder {
   codAmount: number;
   isRTO: boolean;
   rtoReadyTime: number; // minutes from shift start (0-480)
+  rtoDeadline?: number;  // minutes from shift start (0-480)
   twStart: number;      // minutes from shift start
   twEnd: number;        // minutes from shift start
   category: ProductCategory;

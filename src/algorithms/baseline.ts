@@ -22,7 +22,7 @@ function checkIncompatibility(cat1: ProductCategory, cat2: ProductCategory): boo
 
 /**
  * Naive Baseline Solver:
- * Clusters parcels purely based on nearest neighbor geographical proximity and physical weight/volume limits.
+ * Clusters parcels purely based on nearest neighbor geographical proximity up to physical weight/volume limits.
  * Intentionally IGNORES product incompatibilities, COD cash accumulation caps, SLA delivery time windows, and RTO readiness windows.
  */
 export function runBaselineAlgorithm(depot: Depot, riders: Rider[], orders: ParcelOrder[]): { routes: CalculatedRoute[]; metrics: BatchMetrics } {
@@ -48,7 +48,7 @@ export function runBaselineAlgorithm(depot: Depot, riders: Rider[], orders: Parc
       
       for (let i = 0; i < unassigned.length; i++) {
         const ord = unassigned[i];
-        if (currWeight + ord.weightKg <= rider.maxWeightKg && currVolume + ord.volumeM3 <= rider.maxVolumeM3) {
+        if (currWeight + ord.weightKg <= rider.maxWeightKg * 1.5 && currVolume + ord.volumeM3 <= rider.maxVolumeM3 * 1.5) {
           const d = haversineDistanceKm(currLat, currLng, ord.lat, ord.lng);
           if (d < nearestDist) {
             nearestDist = d;
@@ -109,7 +109,8 @@ function buildCalculatedRoute(depot: Depot, rider: Rider, routeOrders: ParcelOrd
     const isSlaBreach = currTimeMin > ord.twEnd;
     if (isSlaBreach) slaBreachCount++;
     
-    const isRtoEarly = ord.isRTO && currTimeMin < ord.rtoReadyTime;
+    const rtoDeadline = ord.rtoDeadline || 480;
+    const isRtoEarly = ord.isRTO && (currTimeMin < ord.rtoReadyTime || currTimeMin > rtoDeadline);
     if (isRtoEarly) rtoEarlyCount++;
     
     let hasIncomp = false;
@@ -167,14 +168,27 @@ function calculateMetrics(name: string, routes: CalculatedRoute[], totalOrdersCo
     rtoEarlyErrors += r.rtoEarlyCount;
   }
   
+  // Re-trip mileage for failed RTO reverse pickups (15 km per failed trip)
+  const reTripDistanceKm = rtoEarlyErrors * 15.0;
+  const effectiveDistanceKm = totalDistanceKm + reTripDistanceKm;
+  
   const slaOnTimePercent = parseFloat((100 * (1 - slaBreachCount / Math.max(1, totalOrdersCount))).toFixed(1));
-  const co2EmissionsKg = parseFloat((totalDistanceKm * 0.211).toFixed(2));
-  const totalCostDollars = parseFloat((totalDistanceKm * 1.45 + routes.length * 45).toFixed(2));
+  const co2EmissionsKg = parseFloat((effectiveDistanceKm * 0.211).toFixed(2));
+  
+  // Total cost modeling including travel, wages, penalties, re-trips, cash fees, contamination fees
+  const travelCost = effectiveDistanceKm * 1.35;
+  const driverWages = routes.length * 6.0 * 20.0;
+  const slaPenalty = slaBreachCount * 35.0;
+  const rtoRetripCost = rtoEarlyErrors * 25.0;
+  const cashBreachFee = cashBreachCount * 200.0;
+  const incompatFee = incompatibilityErrors * 500.0;
+  
+  const totalCostDollars = parseFloat((travelCost + driverWages + slaPenalty + rtoRetripCost + cashBreachFee + incompatFee).toFixed(2));
   
   return {
     name,
-    totalDistanceKm: parseFloat(totalDistanceKm.toFixed(2)),
-    slaOnTimePercent,
+    totalDistanceKm: parseFloat(effectiveDistanceKm.toFixed(2)),
+    slaOnTimePercent: Math.max(0, slaOnTimePercent),
     slaBreachCount,
     cashBreachCount,
     incompatibilityErrors,

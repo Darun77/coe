@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import type { Depot, CalculatedRoute, ParcelOrder, Rider } from '../types';
 import { MapView } from './MapView';
 import { 
-  Truck, DollarSign, Clock, ShieldAlert, RefreshCw, Layers, CheckCircle2, AlertTriangle, ArrowRight, Play
+  Truck, DollarSign, Clock, ShieldAlert, RefreshCw, Layers, CheckCircle2, AlertTriangle, ArrowRight, Play, Download, Search
 } from 'lucide-react';
 
 interface DispatcherDashboardProps {
@@ -24,6 +24,7 @@ export const DispatcherDashboard: React.FC<DispatcherDashboardProps> = ({
   onRunBaseline,
 }) => {
   const [selectedRouteId, setSelectedRouteId] = useState<string | undefined>(routes[0]?.id);
+  const [searchQuery, setSearchQuery] = useState<string>('');
 
   const selectedRoute = routes.find((r) => r.id === selectedRouteId) || routes[0];
 
@@ -35,11 +36,38 @@ export const DispatcherDashboard: React.FC<DispatcherDashboardProps> = ({
 
   const slaOnTimeRate = (100 * (1 - totalSlaBreaches / Math.max(1, orders.length))).toFixed(1);
 
+  // Manifest JSON Export
+  const exportManifestJson = () => {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(routes, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `dispatch_manifest_${activeEngineName.toLowerCase().replace(/\s+/g, '_')}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+  };
+
+  // CSV Report Export
+  const exportReportCsv = () => {
+    let csv = "Route_ID,Rider_Name,Vehicle_Type,Stops_Count,Total_Distance_Km,COD_Cash_Collected,SLA_Breaches,Cash_Breach\n";
+    routes.forEach((r) => {
+      csv += `${r.id},"${r.rider.name}",${r.rider.vehicleType},${r.stops.length},${r.totalDistanceKm},${r.totalCodCash},${r.slaBreachCount},${r.hasCashBreach}\n`;
+    });
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `dispatch_summary_report.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   return (
     <div className="space-y-6">
       
       {/* Top Controls & Mode Switcher */}
-      <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 backdrop-blur-md flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
+      <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 backdrop-blur-md flex flex-col lg:flex-row items-center justify-between gap-4 shadow-xl">
         <div>
           <div className="flex items-center gap-3">
             <h2 className="text-xl font-bold text-slate-100">Dispatcher Control Center</h2>
@@ -56,29 +84,49 @@ export const DispatcherDashboard: React.FC<DispatcherDashboardProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           <button
             onClick={onRunBaseline}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all flex items-center gap-2 ${
+            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all flex items-center gap-2 ${
               activeEngineName.includes('Baseline')
                 ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-lg shadow-amber-500/10'
                 : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
             }`}
           >
             <Layers className="w-4 h-4 text-amber-400" />
-            Naive Baseline (Greedy)
+            Naive Baseline
           </button>
 
           <button
             onClick={onRunEngine}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold border transition-all flex items-center gap-2 ${
+            className={`px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all flex items-center gap-2 ${
               activeEngineName.includes('Constraint')
                 ? 'bg-blue-600 text-white border-blue-500 shadow-lg shadow-blue-600/30'
                 : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
             }`}
           >
             <Play className="w-4 h-4 text-emerald-400 fill-emerald-400" />
-            Constraint-Aware Engine
+            Constraint Engine
+          </button>
+
+          <div className="h-6 w-px bg-slate-800 mx-1 hidden sm:block"></div>
+
+          <button
+            onClick={exportManifestJson}
+            className="px-3 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-all"
+            title="Export Manifest JSON"
+          >
+            <Download className="w-3.5 h-3.5 text-blue-400" />
+            Export JSON
+          </button>
+
+          <button
+            onClick={exportReportCsv}
+            className="px-3 py-2 rounded-xl bg-slate-800 text-slate-300 border border-slate-700 hover:bg-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-all"
+            title="Export Summary CSV"
+          >
+            <Download className="w-3.5 h-3.5 text-emerald-400" />
+            Export CSV
           </button>
         </div>
       </div>
@@ -172,7 +220,20 @@ export const DispatcherDashboard: React.FC<DispatcherDashboardProps> = ({
             
             {/* Route Selector Header */}
             <div>
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider mb-2">Active Rider Manifests</h3>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider">Active Rider Manifests</h3>
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                  <input
+                    type="text"
+                    placeholder="Search stops..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded-xl pl-8 pr-3 py-1 outline-none focus:border-blue-500 w-36"
+                  />
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 gap-2">
                 {routes.map((r) => (
                   <button
@@ -243,47 +304,56 @@ export const DispatcherDashboard: React.FC<DispatcherDashboardProps> = ({
 
                 {/* Stop Items Timeline */}
                 <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
-                  {selectedRoute.stops.map((stop) => (
-                    <div
-                      key={stop.order.id}
-                      className={`p-2.5 rounded-xl border text-xs flex items-center justify-between ${
-                        stop.isSlaBreach
-                          ? 'bg-red-950/30 border-red-800/50 text-slate-200'
-                          : stop.hasIncompatibilityError
-                          ? 'bg-purple-950/30 border-purple-800/50 text-slate-200'
-                          : 'bg-slate-950/60 border-slate-800 text-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <span className="w-5 h-5 rounded-full bg-slate-800 text-slate-400 font-bold flex items-center justify-center text-[10px]">
-                          {stop.stopSequence}
-                        </span>
-                        <div>
-                          <div className="font-semibold flex items-center gap-1.5">
-                            <span>{stop.order.id}</span>
-                            <span className="px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-400">
-                              {stop.order.category}
-                            </span>
-                            {stop.order.isRTO && (
-                              <span className="px-1.5 py-0.2 rounded text-[10px] bg-purple-500/20 text-purple-400 font-semibold">
-                                RTO
+                  {selectedRoute.stops
+                    .filter((stop) => {
+                      if (!searchQuery) return true;
+                      return (
+                        stop.order.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        stop.order.customerName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        stop.order.category.toLowerCase().includes(searchQuery.toLowerCase())
+                      );
+                    })
+                    .map((stop) => (
+                      <div
+                        key={stop.order.id}
+                        className={`p-2.5 rounded-xl border text-xs flex items-center justify-between ${
+                          stop.isSlaBreach
+                            ? 'bg-red-950/30 border-red-800/50 text-slate-200'
+                            : stop.hasIncompatibilityError
+                            ? 'bg-purple-950/30 border-purple-800/50 text-slate-200'
+                            : 'bg-slate-950/60 border-slate-800 text-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <span className="w-5 h-5 rounded-full bg-slate-800 text-slate-400 font-bold flex items-center justify-center text-[10px]">
+                            {stop.stopSequence}
+                          </span>
+                          <div>
+                            <div className="font-semibold flex items-center gap-1.5">
+                              <span>{stop.order.id}</span>
+                              <span className="px-1.5 py-0.2 rounded text-[10px] bg-slate-800 text-slate-400">
+                                {stop.order.category}
                               </span>
-                            )}
-                          </div>
-                          <div className="text-[11px] text-slate-400">
-                            Arrival: min {stop.estimatedArrivalMin} (SLA window: {stop.order.twStart}-{stop.order.twEnd}m)
+                              {stop.order.isRTO && (
+                                <span className="px-1.5 py-0.2 rounded text-[10px] bg-purple-500/20 text-purple-400 font-semibold">
+                                  RTO
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-400">
+                              Arrival: min {stop.estimatedArrivalMin} (SLA: {stop.order.twStart}-{stop.order.twEnd}m)
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="text-right">
-                        {stop.order.codAmount > 0 && (
-                          <div className="font-bold text-amber-400 text-xs">+${stop.order.codAmount}</div>
-                        )}
-                        <div className="text-[10px] text-slate-500">Run: ${stop.accumulatedCash}</div>
+                        <div className="text-right">
+                          {stop.order.codAmount > 0 && (
+                            <div className="font-bold text-amber-400 text-xs">+${stop.order.codAmount}</div>
+                          )}
+                          <div className="text-[10px] text-slate-500">Run: ${stop.accumulatedCash}</div>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               </div>
             )}
